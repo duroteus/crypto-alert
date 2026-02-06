@@ -1,37 +1,46 @@
-import { EXCHANGES, ROUTING_KEYS } from "@alert-system/shared";
+import { createLogger, EXCHANGES, ROUTING_KEYS } from "@alert-system/shared";
+import { CircuitBreaker } from "@alert-system/shared/resilience/circuit-breaker";
 import amqp from "amqplib";
 import { randomUUID } from "crypto";
 
+const logger = createLogger("collector");
+const breaker = new CircuitBreaker(getPrice, 5, 15000);
 const EXCHANGE = EXCHANGES.MAIN;
+const POLL_INTERVAL = 60_000;
+const FETCH_TIMEOUT = 5_000;
 
 async function getPrice() {
-  const res = await fetch(
-    "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-  );
+  const controller = new AbortController();
 
-  if (res.status === 429) {
-    throw new Error("Rate limit exceeded");
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+
+  try {
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+      { signal: controller.signal },
+    );
+
+    if (res.status === 429) {
+      throw new Error("RATE_LIMIT");
+    }
+
+    if (!res.ok) {
+      throw new Error(`HTTP_${res.status}`);
+    }
+
+    const data = await res.json();
+    return data.bitcoin.usd;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  if (!res.ok) {
-    throw new Error("Failed to fetch price");
-  }
-
-  const data = await res.json();
-  return data.bitcoin.usd;
 }
 
-async function run() {
-  const conn = await amqp.connect(`amqp://${process.env.RABBITMQ_HOST}`);
-  const ch = await conn.createChannel();
+async function pollLoop(ch: amqp.Channel) {
+  while (true) {
+    const start = Date.now();
 
-  await ch.assertExchange(EXCHANGE, "topic", { durable: true });
-
-  console.log("📡 Coletor BTC iniciado");
-
-  setInterval(async () => {
     try {
-      const price = await getPrice();
+      const price = await breaker.execute();
       const correlationId = randomUUID();
 
       ch.publish(
@@ -44,13 +53,41 @@ async function run() {
             ts: Date.now(),
           }),
         ),
+        { persistent: true },
       );
 
-      console.log("Tick:", price, "correlationId:", correlationId);
-    } catch (err) {
-      console.error("Erro coletando preço", err);
+      logger.info({ price, correlationId }, "tick published");
+    } catch (err: any) {
+      if (err.message === "CircuitOpen") {
+        logger.warn("circuit open — skipping tick");
+      } else if (err.message === "RATE_LIMIT") {
+        logger.warn("coingecko rate limited");
+      } else if (err.name === "AbortError") {
+        logger.warn("fetch timeout");
+      } else {
+        logger.error({ err }, "collector failure");
+      }
     }
-  }, 60_000);
+
+    const elapsed = Date.now() - start;
+    const sleep = Math.max(0, POLL_INTERVAL - elapsed);
+
+    await new Promise((r) => setTimeout(r, sleep));
+  }
 }
 
-run().catch(console.error);
+async function run() {
+  const conn = await amqp.connect(`amqp://${process.env.RABBITMQ_HOST}`);
+  const ch = await conn.createChannel();
+
+  await ch.assertExchange(EXCHANGE, "topic", { durable: true });
+
+  logger.info("collector started");
+
+  await pollLoop(ch);
+}
+
+run().catch((err) => {
+  logger.fatal({ err }, "collector crashed");
+  process.exit(1);
+});
