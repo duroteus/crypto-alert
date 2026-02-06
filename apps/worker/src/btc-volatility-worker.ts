@@ -15,6 +15,19 @@ const DLX = EXCHANGES.DLX;
 const DLQ = "btc.volatility.dlq";
 const THRESHOLD = 0.5; // volatilidade %
 const EMA_ALERT_THRESHOLD = 0.4;
+const WINDOW_MS = 20 * 60 * 1000;
+
+function classifyError(err: any) {
+  const msg = err?.message ?? "";
+
+  if (msg.includes("Simulated")) return "TRANSIENT";
+
+  if (msg.includes("Redis")) return "INFRA";
+
+  if (msg.includes("JSON")) return "PAYLOAD";
+
+  return "UNKNOWN";
+}
 
 async function computeEMA(key: string, price: number, window: number) {
   const k = 2 / (window + 1);
@@ -33,6 +46,32 @@ async function run() {
   const conn = await amqp.connect(`amqp://${process.env.RABBITMQ_HOST}`);
   const ch = await conn.createChannel();
 
+  // ================= RETRY INFRA =================
+
+  await ch.assertExchange("retry.exchange", "direct", { durable: true });
+
+  await ch.assertQueue("btc.volatility.retry.1", {
+    durable: true,
+    arguments: {
+      "x-message-ttl": 5000,
+      "x-dead-letter-exchange": EXCHANGE,
+      "x-dead-letter-routing-key": ROUTING_KEYS.PRICE_TICK,
+    },
+  });
+
+  await ch.assertQueue("btc.volatility.retry.2", {
+    durable: true,
+    arguments: {
+      "x-message-ttl": 30000,
+      "x-dead-letter-exchange": EXCHANGE,
+      "x-dead-letter-routing-key": ROUTING_KEYS.PRICE_TICK,
+    },
+  });
+
+  await ch.bindQueue("btc.volatility.retry.1", "retry.exchange", "retry.1");
+
+  await ch.bindQueue("btc.volatility.retry.2", "retry.exchange", "retry.2");
+
   await ch.assertExchange(DLX, "topic", { durable: true });
   await ch.assertQueue(DLQ, { durable: true });
   await ch.bindQueue(DLQ, DLX, "#");
@@ -48,18 +87,20 @@ async function run() {
 
   logger.info("worker_started");
 
-  const WINDOW_MS = 20 * 60 * 1000;
-
   ch.consume(q.queue, async (msg) => {
     if (!msg) return;
 
+    let stage = "start";
+
     try {
-      if (Math.random() < 0.2) {
+      if (Math.random() < 0.9) {
         throw new Error("Simulated failure");
       }
 
+      stage = "parse";
       const { price, correlationId } = JSON.parse(msg.content.toString());
       const now = Date.now();
+      stage = "compute_ema";
       const emaFast = await computeEMA("btc:ema:fast", price, 5);
       const emaSlow = await computeEMA("btc:ema:slow", price, 20);
 
@@ -126,8 +167,10 @@ async function run() {
       });
 
       // ===== Sliding Window =====
+      stage = "volatility_window";
       await redis.zadd("btc:prices", now, JSON.stringify({ price, ts: now }));
 
+      stage = "alerts";
       const cutoff = now - WINDOW_MS;
       await redis.zremrangebyscore("btc:prices", 0, cutoff);
 
@@ -202,7 +245,42 @@ async function run() {
 
       ch.ack(msg);
     } catch (err) {
-      logger.error(err, "processing_failed");
+      const headers = msg.properties.headers || {};
+      const retryCount = headers["x-retry"] ?? 0;
+
+      if (retryCount < 2) {
+        const route = retryCount === 0 ? "retry.1" : "retry.2";
+        const errorType = classifyError(err);
+
+        ch.publish("retry.exchange", route, msg.content, {
+          persistent: true,
+          headers: {
+            ...headers,
+            "x-retry": retryCount + 1,
+            "x-worker": "volatility",
+            "x-error-type": errorType,
+            "x-error-msg": err.message,
+            "x-stage": stage,
+            "x-failed-at": Date.now(),
+          },
+        });
+
+        logger.warn(
+          {
+            retryCount,
+            stage,
+            errorType,
+            err,
+          },
+          "scheduled_retry",
+        );
+
+        ch.ack(msg);
+        return;
+      }
+
+      logger.error({ retryCount, err }, "retry_exhausted_sending_to_dlq");
+
       ch.nack(msg, false, false);
     }
   });

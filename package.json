@@ -1,5 +1,5 @@
 {
-  "name": "alert-system",
+  "name": "crypto-alert",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -9,7 +9,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start:collector": "tsx watch --env-file=.env apps/worker/src/btc-collector.ts",
+    "start:volatility": "tsx watch --env-file=.env apps/worker/src/btc-volatility-worker.ts",
+    "start:telegram": "tsx watch --env-file=.env apps/worker/src/telegram-worker.ts",
+    "start:api": "tsx watch --env-file=.env apps/api/src/server.ts"
   },
   "keywords": [],
   "author": "",

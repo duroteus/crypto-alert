@@ -1,5 +1,5 @@
 {
-  "name": "@alert-system/shared",
+  "name": "@crypto-alert/shared",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "version": "1.0.0",

@@ -1,11 +1,9 @@
 {
-  "name": "@alert-system/worker",
+  "name": "@crypto-alert/worker",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
-  "scripts": {
-    "test:rabbit": "ts-node src/test-rabbit.ts"
-  },
+  "scripts": {},
   "keywords": [],
   "author": "",
   "license": "ISC",
