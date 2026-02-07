@@ -12,7 +12,10 @@ const redis = new Redis({
 
 const EXCHANGE = EXCHANGES.MAIN;
 const DLX = EXCHANGES.DLX;
-const DLQ = "btc.volatility.dlq";
+const DLQ = ROUTING_KEYS.VOLATILITY_DLQ;
+const RETRY_1 = ROUTING_KEYS.VOLATILITY_RETRY_1;
+const RETRY_2 = ROUTING_KEYS.VOLATILITY_RETRY_2;
+const PRICE_TICK = ROUTING_KEYS.PRICE_TICK;
 const THRESHOLD = 0.5; // volatilidade %
 const EMA_ALERT_THRESHOLD = 0.4;
 const WINDOW_MS = 20 * 60 * 1000;
@@ -50,27 +53,35 @@ async function run() {
 
   await ch.assertExchange("retry.exchange", "direct", { durable: true });
 
-  await ch.assertQueue("btc.volatility.retry.1", {
+  await ch.assertQueue(RETRY_1, {
     durable: true,
     arguments: {
       "x-message-ttl": 5000,
       "x-dead-letter-exchange": EXCHANGE,
-      "x-dead-letter-routing-key": ROUTING_KEYS.PRICE_TICK,
+      "x-dead-letter-routing-key": PRICE_TICK,
     },
   });
 
-  await ch.assertQueue("btc.volatility.retry.2", {
+  await ch.assertQueue(RETRY_2, {
     durable: true,
     arguments: {
       "x-message-ttl": 30000,
       "x-dead-letter-exchange": EXCHANGE,
-      "x-dead-letter-routing-key": ROUTING_KEYS.PRICE_TICK,
+      "x-dead-letter-routing-key": PRICE_TICK,
     },
   });
 
-  await ch.bindQueue("btc.volatility.retry.1", "retry.exchange", "retry.1");
+  await ch.bindQueue(
+    ROUTING_KEYS.VOLATILITY_RETRY_1,
+    "retry.exchange",
+    "retry.1",
+  );
 
-  await ch.bindQueue("btc.volatility.retry.2", "retry.exchange", "retry.2");
+  await ch.bindQueue(
+    ROUTING_KEYS.VOLATILITY_RETRY_2,
+    "retry.exchange",
+    "retry.2",
+  );
 
   await ch.assertExchange(DLX, "topic", { durable: true });
   await ch.assertQueue(DLQ, { durable: true });
@@ -83,7 +94,7 @@ async function run() {
       "x-dead-letter-exchange": DLX,
     },
   });
-  await ch.bindQueue(q.queue, EXCHANGE, ROUTING_KEYS.PRICE_TICK);
+  await ch.bindQueue(q.queue, EXCHANGE, PRICE_TICK);
 
   logger.info("worker_started");
 
@@ -93,7 +104,7 @@ async function run() {
     let stage = "start";
 
     try {
-      if (Math.random() < 0.9) {
+      if (Math.random() < 0.2) {
         throw new Error("Simulated failure");
       }
 
