@@ -1,7 +1,10 @@
 import { createLogger, EXCHANGES, ROUTING_KEYS } from "@alert-system/shared";
 import { CircuitBreaker } from "@alert-system/shared/resilience/circuit-breaker";
+import { startMetricsServer } from "@crypto-alert/shared/metrics/server";
 import amqp from "amqplib";
 import { randomUUID } from "crypto";
+
+startMetricsServer(9103);
 
 const logger = createLogger("collector");
 const breaker = new CircuitBreaker(getPrice, 5, 15000);

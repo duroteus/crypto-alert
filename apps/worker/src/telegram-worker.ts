@@ -2,6 +2,9 @@ import amqp from "amqplib";
 import Redis from "ioredis";
 
 import { createLogger, EXCHANGES, ROUTING_KEYS } from "@alert-system/shared";
+import { startMetricsServer } from "@crypto-alert/shared/metrics/server";
+
+startMetricsServer(9102);
 
 const logger = createLogger("worker-telegram");
 

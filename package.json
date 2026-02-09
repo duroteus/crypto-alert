@@ -2,8 +2,8 @@
   "name": "crypto-alert",
   "private": true,
   "workspaces": [
-    "apps/*",
-    "packages/*"
+    "apps/**",
+    "packages/**"
   ],
   "version": "1.0.0",
   "description": "",
