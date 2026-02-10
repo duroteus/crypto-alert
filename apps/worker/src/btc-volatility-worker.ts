@@ -3,6 +3,13 @@ import Redis from "ioredis";
 
 import { createLogger, EXCHANGES, ROUTING_KEYS } from "@alert-system/shared";
 import { startMetricsServer } from "@crypto-alert/shared/metrics/server";
+import {
+  messagesConsumed,
+  messagesPublished,
+  processingDuration,
+  queueDepth,
+  retryCount,
+} from "@crypto-alert/shared/metrics";
 
 startMetricsServer(9101);
 
@@ -97,12 +104,38 @@ async function run() {
       "x-dead-letter-exchange": DLX,
     },
   });
-  await ch.bindQueue(q.queue, EXCHANGE, PRICE_TICK);
+  const queueName = q.queue;
+
+  setInterval(async () => {
+    try {
+      const state = await ch.checkQueue(queueName);
+
+      queueDepth.set({ queue: queueName }, state.messageCount);
+    } catch (err) {
+      logger.warn({ err }, "queue_depth_probe_failed");
+    }
+  }, 2000);
+
+  await ch.bindQueue(queueName, EXCHANGE, PRICE_TICK);
 
   logger.info("worker_started");
 
   ch.consume(q.queue, async (msg) => {
     if (!msg) return;
+
+    const correlationId = msg.properties.headers?.["x-correlation-id"];
+    const log = logger.child({ correlationId });
+
+    const routingKey = msg.fields.routingKey;
+
+    messagesConsumed.inc({
+      worker: "volatility",
+      routingKey,
+    });
+
+    const endTimer = processingDuration.startTimer({
+      worker: "volatility",
+    });
 
     let stage = "start";
 
@@ -112,14 +145,14 @@ async function run() {
       }
 
       stage = "parse";
-      const { price, correlationId } = JSON.parse(msg.content.toString());
+      const { price } = JSON.parse(msg.content.toString());
+
       const now = Date.now();
       stage = "compute_ema";
-      const emaFast = await computeEMA("btc:ema:fast", price, 5);
-      const emaSlow = await computeEMA("btc:ema:slow", price, 20);
+      const emaFast = await computeEMA("btc:ema:fast", price, 9);
+      const emaSlow = await computeEMA("btc:ema:slow", price, 50);
 
-      logger.debug({
-        correlationId,
+      log.debug({
         event: "dual_ema",
         emaFast,
         emaSlow,
@@ -133,8 +166,7 @@ async function run() {
         const type =
           currentState === "above" ? "bullish-cross" : "bearish-cross";
 
-        logger.warn({
-          correlationId,
+        log.warn({
           event: "ema_crossover",
           type,
           price,
@@ -155,6 +187,11 @@ async function run() {
             }),
           ),
         );
+
+        messagesPublished.inc({
+          exchange: EXCHANGE,
+          routingKey: "btc.alert.triggered",
+        });
       }
 
       await redis.set("btc:ema:state", currentState);
@@ -172,8 +209,7 @@ async function run() {
 
       const deviationPct = ((price - ema) / ema) * 100;
 
-      logger.info({
-        correlationId,
+      log.info({
         event: "ema_update",
         price,
         ema,
@@ -200,8 +236,7 @@ async function run() {
         const std = Math.sqrt(variance);
         const varPct = (std / avg) * 100;
 
-        logger.debug({
-          correlationId,
+        log.debug({
           event: "volatility_window",
           window: prices.length,
           volatility: varPct,
@@ -223,8 +258,12 @@ async function run() {
             ),
           );
 
-          logger.debug({
-            correlationId,
+          messagesPublished.inc({
+            exchange: EXCHANGE,
+            routingKey: "btc.alert.triggered",
+          });
+
+          log.debug({
             event: "volatility_calc",
             window: prices.length,
             volatility: varPct,
@@ -248,8 +287,12 @@ async function run() {
           ),
         );
 
-        logger.warn({
-          correlationId,
+        messagesPublished.inc({
+          exchange: EXCHANGE,
+          routingKey: "btc.alert.triggered",
+        });
+
+        log.warn({
           event: "ema_alert",
           deviationPct,
           price,
@@ -260,17 +303,22 @@ async function run() {
       ch.ack(msg);
     } catch (err) {
       const headers = msg.properties.headers || {};
-      const retryCount = headers["x-retry"] ?? 0;
+      const currentRetry = headers["x-retry"] ?? 0;
 
-      if (retryCount < 2) {
-        const route = retryCount === 0 ? "retry.1" : "retry.2";
+      if (currentRetry < 2) {
+        const route = currentRetry === 0 ? "retry.1" : "retry.2";
         const errorType = classifyError(err);
+
+        retryCount.inc({
+          worker: "volatility",
+          stage,
+        });
 
         ch.publish("retry.exchange", route, msg.content, {
           persistent: true,
           headers: {
             ...headers,
-            "x-retry": retryCount + 1,
+            "x-retry": currentRetry + 1,
             "x-worker": "volatility",
             "x-error-type": errorType,
             "x-error-msg": err.message,
@@ -279,9 +327,9 @@ async function run() {
           },
         });
 
-        logger.warn(
+        log.warn(
           {
-            retryCount,
+            retryCount: currentRetry,
             stage,
             errorType,
             err,
@@ -293,9 +341,14 @@ async function run() {
         return;
       }
 
-      logger.error({ retryCount, err }, "retry_exhausted_sending_to_dlq");
+      log.error(
+        { retryCount: currentRetry, err },
+        "retry_exhausted_sending_to_dlq",
+      );
 
       ch.nack(msg, false, false);
+    } finally {
+      endTimer();
     }
   });
 }

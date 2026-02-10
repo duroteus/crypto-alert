@@ -20,3 +20,10 @@ export const workerHeartbeat = new client.Gauge({
   labelNames: ["worker"],
   registers: [register],
 });
+
+export const queueDepth = new client.Gauge({
+  name: "rabbitmq_queue_depth",
+  help: "Number of messages ready in queue",
+  labelNames: ["queue"],
+  registers: [register],
+});

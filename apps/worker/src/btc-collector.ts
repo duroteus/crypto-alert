@@ -51,12 +51,16 @@ async function pollLoop(ch: amqp.Channel) {
         ROUTING_KEYS.PRICE_TICK,
         Buffer.from(
           JSON.stringify({
-            correlationId,
             price,
             ts: Date.now(),
           }),
         ),
-        { persistent: true },
+        {
+          persistent: true,
+          headers: {
+            "x-correlation-id": correlationId,
+          },
+        },
       );
 
       logger.info({ price, correlationId }, "tick published");
