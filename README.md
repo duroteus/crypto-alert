@@ -277,7 +277,7 @@ This repository serves as:
 
 Planned evolutions:
 
-- [ ] Metrics / observability layer (Prometheus + Grafana)
+- [x] Metrics / observability layer (Prometheus + Grafana)
 - [ ] Distributed tracing (OpenTelemetry)
 - [ ] Web dashboard visualization
 - [ ] Historical analytics storage (TimescaleDB)
@@ -287,9 +287,3 @@ Planned evolutions:
 - [ ] Webhook notifications support
 - [ ] Alert backtesting system
 - [ ] Circuit breaker metrics & monitoring
-
----
-
-## 👤 Author
-
-**Gustavo Aragão**
